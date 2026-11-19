@@ -251,38 +251,6 @@ export default function Home() {
     };
   }, []);
 
-  // Reattach the existing stream when Live Monitoring remounts its video element.
-  // Switching to Media Analysis removes the <video> element, but should not stop
-  // the browser webcam stream. When Live Monitoring returns, attach it again.
-  useEffect(() => {
-    if (mode !== "live" || !webcamEnabled) return;
-
-    const video = webcamVideoRef.current;
-    const stream = webcamStreamRef.current;
-
-    if (!video || !stream) return;
-
-    video.srcObject = stream;
-    video.muted = true;
-    video.playsInline = true;
-
-    video.play().catch((error) => {
-      console.error("Webcam preview could not resume:", error);
-      setWebcamError("Could not resume webcam preview. Please try enabling the webcam again.");
-    });
-
-    setCameraActive(
-      stream.getVideoTracks().some((track) => track.readyState === "live")
-    );
-
-    return () => {
-      // Detach only the preview element; keep the camera stream alive.
-      if (video.srcObject === stream) {
-        video.srcObject = null;
-      }
-    };
-  }, [mode, webcamEnabled]);
-
   // Release browser preview URL on replacement/unmount
   useEffect(() => {
     return () => {
