@@ -1,4 +1,4 @@
-
+﻿
 "use client";
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
@@ -453,7 +453,7 @@ export default function Home() {
 
   const trackedCount =
     mode === "live"
-      ? latestLive?.tracked_objects ?? latestLive?.unique_objects ?? latestLive?.object_count ?? 0
+      ? latestLive?.tracked_objects ?? latestLive?.object_count ?? 0
       : latestMedia?.object_count ?? 0;
 
   const averageConfidence = latestObjects.length
@@ -480,13 +480,13 @@ export default function Home() {
               className="flex h-11 w-11 items-center justify-center rounded-xl text-2xl"
               style={{ background: "#FFFFFF20", color: C.lavender }}
             >
-              ◈
+              â—ˆ
             </div>
             <div>
               <h1 className="text-xl font-bold text-white">
                 Aero<span style={{ color: C.lavender }}>Vision</span>
               </h1>
-              <p className="text-xs" style={{ color: C.ice }}>
+              <p className="text-xs" style={{ color: C.mist }}>
                 Aerial intelligence & visual analytics
               </p>
             </div>
@@ -531,10 +531,10 @@ export default function Home() {
               className="rounded-xl px-4 py-4 text-sm font-bold disabled:opacity-50"
               style={{
                 background: mode === "live" ? C.header : C.pale,
-                color: mode === "live" ? C.white : C.slate,
+                color: mode === "live" ? C.white : C.text,
               }}
             >
-              ◉ Live Monitoring
+              â—‰ Live Monitoring
             </button>
 
             <button
@@ -546,7 +546,7 @@ export default function Home() {
                 color: mode === "media" ? C.white : C.purple,
               }}
             >
-              ⇧ Media Analysis
+              â‡§ Media Analysis
             </button>
           </div>
 
@@ -621,15 +621,15 @@ export default function Home() {
                 className="flex min-h-[150px] w-full flex-col items-center justify-center rounded-xl border-2 border-dashed p-6 disabled:opacity-50"
                 style={{ borderColor: C.mist, background: C.pale }}
               >
-                <span className="text-3xl" style={{ color: C.teal }}>⇧</span>
+                <span className="text-3xl" style={{ color: C.teal }}>â‡§</span>
                 <span className="mt-2 font-semibold">
                   {uploading ? "Uploading media..." : "Choose image or MP4 video"}
                 </span>
                 <span className="mt-1 text-xs" style={{ color: C.muted }}>
-                  JPG · PNG · WEBP · MP4
+                  JPG Â· PNG Â· WEBP Â· MP4
                 </span>
                 <span className="mt-1 text-xs" style={{ color: C.muted }}>
-                  Images up to 10 MB · Videos up to 50 MB
+                  Images up to 10 MB Â· Videos up to 50 MB
                 </span>
               </button>
 
@@ -714,7 +714,7 @@ export default function Home() {
                     <div className="mb-3 flex flex-wrap items-center justify-between gap-2">
                       <span className="text-sm font-bold">Frame controls</span>
                       <span className="text-xs" style={{ color: C.muted }}>
-                        {videoInfo.fps.toFixed(2)} FPS · {videoInfo.total_frames} frames
+                        {videoInfo.fps.toFixed(2)} FPS Â· {videoInfo.total_frames} frames
                       </span>
                     </div>
 
@@ -740,9 +740,9 @@ export default function Home() {
                     </div>
 
                     <div className="mt-4 flex flex-wrap items-center justify-center gap-2">
-                      <ControlButton label="−5s" onClick={() => seekBy(-5)} />
-                      <ControlButton label="−1s" onClick={() => seekBy(-1)} />
-                      <ControlButton label="−1 frame" onClick={() => stepFrame(-1)} />
+                      <ControlButton label="âˆ’5s" onClick={() => seekBy(-5)} />
+                      <ControlButton label="âˆ’1s" onClick={() => seekBy(-1)} />
+                      <ControlButton label="âˆ’1 frame" onClick={() => stepFrame(-1)} />
                       <ControlButton
                         label={videoRef.current?.paused === false ? "Pause" : "Play"}
                         primary
@@ -779,7 +779,7 @@ export default function Home() {
                     <div className="flex flex-wrap justify-between gap-2">
                       <h4 className="font-bold">Selected Frame Analysis</h4>
                       <span className="text-xs" style={{ color: C.muted }}>
-                        Frame {frameResult?.frame_index ?? "—"} · {clock(frameResult?.video_timestamp ?? 0)}
+                        Frame {frameResult?.frame_index ?? "â€”"} Â· {clock(frameResult?.video_timestamp ?? 0)}
                       </span>
                     </div>
 
@@ -872,8 +872,8 @@ export default function Home() {
         </section>
 
         <footer className="flex flex-wrap justify-between gap-3 border-t py-5 text-xs" style={{ borderColor: C.border, color: C.muted }}>
-          <span className="font-semibold">AeroVision · Aerial Intelligence Platform</span>
-          <span>YOLOv5n · ONNX Runtime · FastAPI · Next.js</span>
+          <span className="font-semibold">AeroVision Â· Aerial Intelligence Platform</span>
+          <span>YOLOv5n Â· ONNX Runtime Â· FastAPI Â· Next.js</span>
         </footer>
       </div>
     </main>
@@ -947,7 +947,7 @@ function ControlButton({ label, onClick, primary = false }: { label: string; onC
       className="rounded-lg px-3 py-2 text-xs font-bold transition hover:opacity-80"
       style={{
         background: primary ? C.header : C.white,
-        color: primary ? C.white : C.slate,
+        color: primary ? C.white : C.text,
         border: `1px solid ${C.border}`,
       }}
     >
@@ -964,9 +964,9 @@ function DetectionList({ detections, compact = false }: { detections: Detection[
   return (
     <div className={`mt-3 flex flex-wrap gap-2 ${compact ? "" : "mt-4"}`}>
       {detections.map((item, index) => (
-        <span key={`${item.class_name}-${index}`} className="rounded-md px-2 py-1 text-xs font-medium" style={{ background: "#DCEBED", color: C.slate }}>
-          {item.track_id != null ? `ID ${item.track_id} · ` : ""}
-          {item.class_name} · {(item.confidence * 100).toFixed(1)}%
+        <span key={`${item.class_name}-${index}`} className="rounded-md px-2 py-1 text-xs font-medium" style={{ background: "#DCEBED", color: C.text }}>
+          {item.track_id != null ? `ID ${item.track_id} Â· ` : ""}
+          {item.class_name} Â· {(item.confidence * 100).toFixed(1)}%
         </span>
       ))}
     </div>
@@ -980,3 +980,4 @@ function Empty({ message }: { message: string }) {
     </div>
   );
 }
+
