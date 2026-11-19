@@ -95,6 +95,8 @@ export default function Home() {
   const [videoInfo, setVideoInfo] = useState<VideoInfo | null>(null);
   const [frameResult, setFrameResult] = useState<FrameResult | null>(null);
   const [frameLoading, setFrameLoading] = useState(false);
+  const [videoPlaying, setVideoPlaying] = useState(false);
+  const [videoCurrentTime, setVideoCurrentTime] = useState(0);
 
   const inputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
@@ -102,6 +104,8 @@ export default function Home() {
   const lastFrameRequestRef = useRef(0);
   const lastEventFrameRef = useRef(-1);
   const lastActivityTimeRef = useRef(0);
+  const frameInFlightRef = useRef(false);
+  const analysisAbortRef = useRef<AbortController | null>(null);
 
   // Backend health
   useEffect(() => {
@@ -250,11 +254,21 @@ export default function Home() {
       URL.revokeObjectURL(selectedFileUrl);
     }
 
+    analysisAbortRef.current?.abort();
+    frameRequestRef.current += 1;
+    frameInFlightRef.current = false;
+    analysisAbortRef.current = null;
+    lastFrameRequestRef.current = -1;
+    lastActivityTimeRef.current = 0;
+
     setSelectedFileUrl(URL.createObjectURL(file));
     setSelectedFileType(isImage ? "image" : "video");
     setImageResult("");
     setVideoInfo(null);
     setFrameResult(null);
+    setFrameLoading(false);
+    setVideoPlaying(false);
+    setVideoCurrentTime(0);
     setMediaEvents([]);
     setUploadError("");
     setUploading(true);
@@ -302,106 +316,108 @@ export default function Home() {
     }
   };
 
-  // Request exact selected video frame from backend
+  // Analyse a selected frame. Forced requests supersede any older request.
   const analyzeFrame = useCallback(
     async (frameIndex: number, force = false) => {
-      if (!videoInfo) return;
+      if (!videoInfo || videoInfo.total_frames <= 0) return;
 
       const boundedFrame = Math.max(
         0,
-        Math.min(videoInfo.total_frames - 1, frameIndex)
+        Math.min(videoInfo.total_frames - 1, Math.floor(frameIndex))
       );
 
+      if (!force && frameInFlightRef.current) return;
       if (!force && boundedFrame === lastFrameRequestRef.current) return;
 
-      lastFrameRequestRef.current = boundedFrame;
+      if (force) analysisAbortRef.current?.abort();
 
       const requestId = ++frameRequestRef.current;
+      const controller = new AbortController();
+      analysisAbortRef.current = controller;
+      frameInFlightRef.current = true;
+      lastFrameRequestRef.current = boundedFrame;
       setFrameLoading(true);
 
       try {
-        const url =
-          `${API}/media/${videoInfo.media_id}/frame` +
-          `?frame_index=${boundedFrame}`;
-
-        const response = await fetch(url);
+        const response = await fetch(
+          `${API}/media/${videoInfo.media_id}/frame?frame_index=${boundedFrame}`,
+          { signal: controller.signal }
+        );
 
         if (!response.ok) {
-          const error = await response.json();
-          throw new Error(error.detail || "Frame analysis failed");
+          let message = "Frame analysis failed";
+          try {
+            const error = await response.json();
+            message = error.detail || message;
+          } catch {
+            // Keep the fallback error message.
+          }
+          throw new Error(message);
         }
 
         const result: FrameResult = await response.json();
-
-        // Ignore stale results if the user has already moved to another frame.
         if (requestId !== frameRequestRef.current) return;
 
         setFrameResult(result);
         setLastUpdate(new Date().toLocaleTimeString());
 
-        // Record activity approximately once per second during playback,
-        // and always when paused/seeking/stepping.
         const now = Date.now();
         const video = videoRef.current;
         const paused = !video || video.paused;
 
-        if (
-          paused ||
-          now - lastActivityTimeRef.current >= 1000 ||
-          boundedFrame === 0
-        ) {
-          setMediaEvents((previous) => {
-            const filtered = previous.filter(
-              (event) => event.frame_id !== boundedFrame
-            );
-
-            return [
-              result.activity_event,
-              ...filtered,
-            ].slice(0, 200);
-          });
-
+        if (paused || now - lastActivityTimeRef.current >= 1000 || boundedFrame === 0) {
+          setMediaEvents((previous) => [
+            result.activity_event,
+            ...previous.filter((event) => event.frame_id !== boundedFrame),
+          ].slice(0, 200));
           lastActivityTimeRef.current = now;
         }
       } catch (error) {
-        if (requestId === frameRequestRef.current) {
+        const aborted = error instanceof DOMException && error.name === "AbortError";
+        if (requestId === frameRequestRef.current && !aborted) {
           setUploadError(
             error instanceof Error ? error.message : "Frame analysis failed"
           );
         }
       } finally {
         if (requestId === frameRequestRef.current) {
+          frameInFlightRef.current = false;
           setFrameLoading(false);
+          analysisAbortRef.current = null;
         }
       }
     },
     [videoInfo]
   );
 
-  // Map video playback position to exact frame number.
+  // Keep the timeline synchronized with the original video.
   const handleVideoTime = (force = false) => {
     const video = videoRef.current;
-
     if (!video || !videoInfo || !Number.isFinite(video.currentTime)) return;
+
+    setVideoCurrentTime(video.currentTime);
+    if (!force) return;
 
     const frameIndex = Math.min(
       videoInfo.total_frames - 1,
       Math.max(0, Math.floor(video.currentTime * videoInfo.fps + 0.00001))
     );
-
-    const now = Date.now();
-
-    // During playback, request frames at most every 250 ms.
-    if (
-      !force &&
-      !video.paused &&
-      now - lastActivityTimeRef.current < 250
-    ) {
-      return;
-    }
-
-    analyzeFrame(frameIndex, force);
+    analyzeFrame(frameIndex, true);
   };
+
+  // Analyse up to 2 frames per second. Skip ticks while inference is busy.
+  useEffect(() => {
+    if (mode !== "media" || selectedFileType !== "video" || !videoInfo) return;
+
+    const timer = setInterval(() => {
+      const video = videoRef.current;
+      if (!video || video.paused || video.ended || frameInFlightRef.current) return;
+
+      analyzeFrame(Math.floor(video.currentTime * videoInfo.fps));
+    }, 500);
+
+    return () => clearInterval(timer);
+  }, [mode, selectedFileType, videoInfo, analyzeFrame]);
 
   const seekBy = (seconds: number) => {
     const video = videoRef.current;
@@ -411,7 +427,7 @@ export default function Home() {
       0,
       Math.min(videoInfo.duration_seconds, video.currentTime + seconds)
     );
-
+    setVideoCurrentTime(video.currentTime);
     handleVideoTime(true);
   };
 
@@ -426,14 +442,10 @@ export default function Home() {
 
     video.currentTime = Math.max(
       0,
-      Math.min(
-        videoInfo.duration_seconds,
-        nextTime
-      )
+      Math.min(videoInfo.duration_seconds, nextTime)
     );
-
-    // The seeked event also requests the exact frame.
-    setTimeout(() => handleVideoTime(true), 50);
+    setVideoCurrentTime(video.currentTime);
+    handleVideoTime(true);
   };
 
   const visibleEvents = mode === "live" ? liveEvents : mediaEvents;
@@ -683,12 +695,18 @@ export default function Home() {
                           const video = videoRef.current;
                           if (video) {
                             video.currentTime = 0;
+                            setVideoCurrentTime(0);
+                            setVideoPlaying(false);
                             analyzeFrame(0, true);
                           }
                         }}
                         onTimeUpdate={() => handleVideoTime(false)}
                         onSeeked={() => handleVideoTime(true)}
-                        onPause={() => handleVideoTime(true)}
+                        onPlay={() => setVideoPlaying(true)}
+                        onPause={() => {
+                          setVideoPlaying(false);
+                          handleVideoTime(true);
+                        }}
                       />
                     </MediaPanel>
 
@@ -723,19 +741,20 @@ export default function Home() {
                       min={0}
                       max={Math.max(0, videoInfo.duration_seconds)}
                       step={1 / videoInfo.fps}
-                      value={videoRef.current?.currentTime || 0}
+                      value={videoCurrentTime}
                       onChange={(event) => {
                         const video = videoRef.current;
                         if (!video) return;
                         video.pause();
                         video.currentTime = Number(event.target.value);
+                        setVideoCurrentTime(video.currentTime);
                         handleVideoTime(true);
                       }}
                       className="w-full accent-[#66909E]"
                     />
 
                     <div className="mt-2 flex justify-between text-xs" style={{ color: C.muted }}>
-                      <span>{clock(videoRef.current?.currentTime || 0)}</span>
+                      <span>{clock(videoCurrentTime)}</span>
                       <span>{clock(videoInfo.duration_seconds)}</span>
                     </div>
 
@@ -744,7 +763,7 @@ export default function Home() {
                       <ControlButton label="−1s" onClick={() => seekBy(-1)} />
                       <ControlButton label="−1 frame" onClick={() => stepFrame(-1)} />
                       <ControlButton
-                        label={videoRef.current?.paused === false ? "Pause" : "Play"}
+                        label={videoPlaying ? "Pause" : "Play"}
                         primary
                         onClick={() => {
                           const video = videoRef.current;
