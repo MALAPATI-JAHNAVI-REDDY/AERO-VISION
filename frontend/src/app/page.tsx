@@ -81,6 +81,9 @@ export default function Home() {
   const [backendOnline, setBackendOnline] = useState(false);
   const [connected, setConnected] = useState(false);
   const [cameraActive, setCameraActive] = useState(false);
+  const [webcamStarting, setWebcamStarting] = useState(false);
+  const [webcamError, setWebcamError] = useState("");
+  const [webcamEnabled, setWebcamEnabled] = useState(false);
 
   const [liveEvents, setLiveEvents] = useState<Event[]>([]);
   const [mediaEvents, setMediaEvents] = useState<Event[]>([]);
@@ -100,6 +103,8 @@ export default function Home() {
 
   const inputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
+  const webcamVideoRef = useRef<HTMLVideoElement>(null);
+  const webcamStreamRef = useRef<MediaStream | null>(null);
   const frameRequestRef = useRef(0);
   const lastFrameRequestRef = useRef(0);
   const lastEventFrameRef = useRef(-1);
@@ -186,6 +191,63 @@ export default function Home() {
       active = false;
       clearTimeout(reconnectTimer);
       socket?.close();
+    };
+  }, []);
+
+  // Start the webcam attached to the device currently viewing this website.
+  const startWebcam = async () => {
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setWebcamError("Camera access is unavailable. Open AeroVision using HTTPS or localhost in a supported browser.");
+      return;
+    }
+
+    setWebcamStarting(true);
+    setWebcamError("");
+
+    try {
+      const stream = await navigator.mediaDevices.getUserMedia({
+        audio: false,
+        video: {
+          facingMode: { ideal: "environment" },
+          width: { ideal: 1280 },
+          height: { ideal: 720 },
+          frameRate: { ideal: 15, max: 20 },
+        },
+      });
+
+      webcamStreamRef.current = stream;
+      if (webcamVideoRef.current) {
+        webcamVideoRef.current.srcObject = stream;
+        await webcamVideoRef.current.play().catch(() => undefined);
+      }
+      setWebcamEnabled(true);
+      setCameraActive(true);
+    } catch (error) {
+      const name = error instanceof DOMException ? error.name : "";
+      if (name === "NotAllowedError" || name === "SecurityError") {
+        setWebcamError("Camera permission was denied. Allow camera access in your browser settings, then try again.");
+      } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
+        setWebcamError("No webcam was found on this device.");
+      } else {
+        setWebcamError(error instanceof Error ? error.message : "Could not start the webcam.");
+      }
+    } finally {
+      setWebcamStarting(false);
+    }
+  };
+
+  const stopWebcam = () => {
+    webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
+    webcamStreamRef.current = null;
+    if (webcamVideoRef.current) webcamVideoRef.current.srcObject = null;
+    setWebcamEnabled(false);
+    setCameraActive(false);
+  };
+
+  // Always release the webcam when leaving the page.
+  useEffect(() => {
+    return () => {
+      webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
     };
   }, []);
 
@@ -599,19 +661,69 @@ export default function Home() {
               </p>
             </div>
 
+            <div className="mb-3 flex flex-wrap items-center gap-3">
+              {!webcamEnabled ? (
+                <button
+                  onClick={startWebcam}
+                  disabled={webcamStarting}
+                  className="rounded-xl px-5 py-3 text-sm font-bold text-white disabled:opacity-50"
+                  style={{ background: C.header }}
+                >
+                  {webcamStarting ? "Connecting webcam..." : "Enable this device's webcam"}
+                </button>
+              ) : (
+                <button
+                  onClick={stopWebcam}
+                  className="rounded-xl px-5 py-3 text-sm font-bold text-white"
+                  style={{ background: "#A94442" }}
+                >
+                  Stop webcam
+                </button>
+              )}
+              <span className="text-xs" style={{ color: C.muted }}>
+                {webcamEnabled ? "Browser webcam connected" : "Camera permission is requested only when you click Enable"}
+              </span>
+            </div>
+
+            {webcamError && (
+              <div className="rounded-xl bg-red-50 p-3 text-sm text-red-700">
+                {webcamError}
+              </div>
+            )}
+
             <div className="grid grid-cols-1 gap-5 xl:grid-cols-2">
-              <VideoPanel
-                title="RAW CAMERA FEED"
-                subtitle="Original camera stream"
-                endpoint={`${API}/video/raw`}
-                accent={C.teal}
-              />
-              <VideoPanel
-                title="AI DETECTION FEED"
-                subtitle="YOLOv5 annotated stream"
-                endpoint={`${API}/video/annotated`}
-                accent={C.purple}
-              />
+              <div className="overflow-hidden rounded-2xl border bg-white shadow-sm" style={{ borderColor: C.border }}>
+                <div className="border-b px-5 py-4" style={{ borderColor: C.border }}>
+                  <h4 className="text-sm font-bold">DEVICE WEBCAM FEED</h4>
+                  <p className="mt-1 text-xs" style={{ color: C.muted }}>Live camera from the device viewing this website</p>
+                </div>
+                <div className="flex aspect-[4/3] items-center justify-center bg-[#18232B]">
+                  <video
+                    ref={webcamVideoRef}
+                    autoPlay
+                    playsInline
+                    muted
+                    className={`h-full w-full object-contain ${webcamEnabled ? "" : "hidden"}`}
+                  />
+                  {!webcamEnabled && (
+                    <p className="px-5 text-center text-sm text-white">Enable the webcam to see its live feed here.</p>
+                  )}
+                </div>
+              </div>
+
+              <div className="overflow-hidden rounded-2xl border bg-white shadow-sm" style={{ borderColor: C.border }}>
+                <div className="border-b px-5 py-4" style={{ borderColor: C.border }}>
+                  <h4 className="text-sm font-bold">AI DETECTION FEED</h4>
+                  <p className="mt-1 text-xs" style={{ color: C.muted }}>YOLO-annotated webcam frames</p>
+                </div>
+                <div className="flex aspect-[4/3] items-center justify-center bg-[#18232B] p-6">
+                  <p className="text-center text-sm text-white">
+                    {webcamEnabled
+                      ? "Webcam is connected. AI frame analysis will be connected in the next step."
+                      : "Enable the webcam first. AI analysis will follow."}
+                  </p>
+                </div>
+              </div>
             </div>
           </section>
         )}
