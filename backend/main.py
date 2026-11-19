@@ -1,4 +1,5 @@
-
+﻿
+import os
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
@@ -9,16 +10,25 @@ from backend.routers import health, detections, live, video, mode
 from backend.services.camera_service import camera_service
 
 
+CAMERA_ENABLED = (
+    os.getenv("AEROVISION_START_CAMERA", "true").lower()
+    in ("1", "true", "yes")
+)
+
+
 @asynccontextmanager
 async def lifespan(app: FastAPI):
-    # Default operating mode is Live Monitoring.
-    camera_service.start()
-    print("[SYSTEM] AeroVision started in Live Monitoring mode")
+    if CAMERA_ENABLED:
+        camera_service.start()
+        print("[SYSTEM] AeroVision started in Live Monitoring mode")
+    else:
+        print("[SYSTEM] Camera startup disabled; API running in cloud mode")
 
     yield
 
-    camera_service.stop()
-    print("[SYSTEM] AeroVision camera service stopped")
+    if CAMERA_ENABLED:
+        camera_service.stop()
+        print("[SYSTEM] AeroVision camera service stopped")
 
 
 app = FastAPI(
@@ -27,16 +37,19 @@ app = FastAPI(
     lifespan=lifespan
 )
 
+
 app.add_middleware(
     CORSMiddleware,
     allow_origins=[
         "http://localhost:3000",
-        "http://127.0.0.1:3000"
+        "http://127.0.0.1:3000",
+        "https://aero-vision-one.vercel.app",
     ],
     allow_credentials=True,
     allow_methods=["*"],
-    allow_headers=["*"]
+    allow_headers=["*"],
 )
+
 
 app.include_router(health.router)
 app.include_router(detections.router)

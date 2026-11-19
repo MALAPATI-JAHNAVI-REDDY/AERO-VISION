@@ -1,4 +1,6 @@
 
+import os
+
 from fastapi import APIRouter, HTTPException
 from pydantic import BaseModel
 
@@ -7,6 +9,11 @@ from backend.services.camera_service import camera_service
 router = APIRouter(tags=["Operating Mode"])
 
 active_mode = "live"
+
+CAMERA_ENABLED = (
+    os.getenv("AEROVISION_START_CAMERA", "true").lower()
+    in ("1", "true", "yes")
+)
 
 
 class ModeRequest(BaseModel):
@@ -39,6 +46,12 @@ def change_mode(request: ModeRequest):
         active_mode = "media"
 
     else:
+        if not CAMERA_ENABLED:
+            raise HTTPException(
+                status_code=503,
+                detail="Physical camera is disabled on this server."
+            )
+
         try:
             camera_service.start()
             active_mode = "live"
