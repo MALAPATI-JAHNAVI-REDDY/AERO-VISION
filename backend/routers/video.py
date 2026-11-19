@@ -50,7 +50,8 @@ FRAME_CACHE_SIZE = 24
 
 media_detector = None
 
-detector_lock = threading.Lock()
+detector_lock = threading.Lock()  # Protects lazy model initialization.
+inference_lock = threading.Lock()  # Serializes ONNX inference.
 jobs_lock = threading.Lock()
 
 media_jobs = {}
@@ -251,7 +252,7 @@ async def upload_media(file: UploadFile = File(...)):
                 detail="Could not decode this image."
             )
 
-        with detector_lock:
+        with inference_lock:
             detector = get_media_detector()
             detections = detector.detect(image)
             annotated = detector.annotate(image, detections)
@@ -359,24 +360,63 @@ async def upload_media(file: UploadFile = File(...)):
 # --------------------------------------------------
 
 def get_video_frame(job, frame_index):
+    """
+    Read an exact frame from the uploaded video.
+
+    OpenCV seeking can fail on some MP4 codecs. If direct seeking fails,
+    reopen the file and decode sequentially up to the requested frame.
+    """
     with job["capture_lock"]:
-        capture = job["capture"]
+        capture = job.get("capture")
 
         if capture is None or not capture.isOpened():
+            if capture is not None:
+                capture.release()
+
             capture = cv2.VideoCapture(str(job["path"]))
             job["capture"] = capture
 
-        capture.set(
-            cv2.CAP_PROP_POS_FRAMES,
-            frame_index
-        )
+        if not capture.isOpened():
+            capture.release()
+            job["capture"] = None
+            return None
 
+        # Fast path: seek directly to the requested frame.
+        seek_ok = capture.set(cv2.CAP_PROP_POS_FRAMES, frame_index)
         success, frame = capture.read()
 
-        if not success or frame is None:
+        if seek_ok and success and frame is not None:
+            return frame
+
+        # Fallback: some codecs/container indexes do not support reliable
+        # random seeking. Reopen and decode from the beginning instead.
+        capture.release()
+        capture = cv2.VideoCapture(str(job["path"]))
+        job["capture"] = capture
+
+        if not capture.isOpened():
+            capture.release()
+            job["capture"] = None
+            return None
+
+        frame = None
+
+        for current_index in range(frame_index + 1):
+            success, candidate = capture.read()
+
+            if not success or candidate is None:
+                frame = None
+                break
+
+            frame = candidate
+
+        if frame is None:
+            capture.release()
+            job["capture"] = None
             return None
 
         return frame
+
 
 
 # --------------------------------------------------
@@ -414,7 +454,7 @@ def analyze_video_frame(media_id: str, frame_index: int):
         )
 
     # Only one inference at a time.
-    with detector_lock:
+    with inference_lock:
         detector = get_media_detector()
         detections = detector.detect(frame)
         annotated = detector.annotate(frame, detections)

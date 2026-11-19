@@ -3,7 +3,7 @@
 
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
-const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8000";
+const API = process.env.NEXT_PUBLIC_API_URL || "http://127.0.0.1:8001";
 const WS = API.replace(/^http/, "ws") + "/ws/detections";
 
 const C = {
@@ -84,6 +84,9 @@ export default function Home() {
   const [webcamStarting, setWebcamStarting] = useState(false);
   const [webcamError, setWebcamError] = useState("");
   const [webcamEnabled, setWebcamEnabled] = useState(false);
+  const [annotatedLiveImage, setAnnotatedLiveImage] = useState("");
+  const [liveInferenceMs, setLiveInferenceMs] = useState<number | null>(null);
+  const [liveInferenceError, setLiveInferenceError] = useState("");
 
   const [liveEvents, setLiveEvents] = useState<Event[]>([]);
   const [mediaEvents, setMediaEvents] = useState<Event[]>([]);
@@ -104,7 +107,10 @@ export default function Home() {
   const inputRef = useRef<HTMLInputElement>(null);
   const videoRef = useRef<HTMLVideoElement>(null);
   const webcamVideoRef = useRef<HTMLVideoElement>(null);
+  const liveInferenceInFlightRef = useRef(false);
   const webcamStreamRef = useRef<MediaStream | null>(null);
+  const webcamStartingRef = useRef(false);
+  const webcamRequestRef = useRef(0);
   const frameRequestRef = useRef(0);
   const lastFrameRequestRef = useRef(0);
   const lastEventFrameRef = useRef(-1);
@@ -157,6 +163,10 @@ export default function Home() {
 
           const raw = payload.data;
 
+          // Browser webcam frames are already added from the POST response.
+          // Ignore their log copies here to prevent duplicate activity entries.
+          if (raw.camera_source === "browser_webcam" || raw.source === "browser_webcam") return;
+
           const event: Event = {
             ...raw,
             source: "live_camera",
@@ -195,12 +205,29 @@ export default function Home() {
   }, []);
 
   // Start the webcam attached to the device currently viewing this website.
-  const startWebcam = async () => {
-    if (!navigator.mediaDevices?.getUserMedia) {
-      setWebcamError("Camera access is unavailable. Open AeroVision using HTTPS or localhost in a supported browser.");
+  const startWebcam = useCallback(async () => {
+    if (webcamStreamRef.current) {
+      const existingVideo = webcamVideoRef.current;
+      if (existingVideo && existingVideo.srcObject !== webcamStreamRef.current) {
+        existingVideo.srcObject = webcamStreamRef.current;
+        await existingVideo.play().catch(() => undefined);
+      }
+      setWebcamEnabled(true);
+      setCameraActive(true);
       return;
     }
 
+    if (webcamStartingRef.current) return;
+
+    if (!navigator.mediaDevices?.getUserMedia) {
+      setWebcamError(
+        "Camera access is unavailable. Open AeroVision using HTTPS or localhost in a supported browser."
+      );
+      return;
+    }
+
+    webcamStartingRef.current = true;
+    const requestId = ++webcamRequestRef.current;
     setWebcamStarting(true);
     setWebcamError("");
 
@@ -215,39 +242,206 @@ export default function Home() {
         },
       });
 
+      // If the user left Live Monitoring while permission was pending,
+      // release this stream instead of activating the camera in the background.
+      if (requestId !== webcamRequestRef.current) {
+        stream.getTracks().forEach((track) => track.stop());
+        return;
+      }
+
       webcamStreamRef.current = stream;
-      if (webcamVideoRef.current) {
-        webcamVideoRef.current.srcObject = stream;
-        await webcamVideoRef.current.play().catch(() => undefined);
+      const video = webcamVideoRef.current;
+      if (video) {
+        video.srcObject = stream;
+        await video.play().catch(() => undefined);
       }
       setWebcamEnabled(true);
       setCameraActive(true);
+
+      stream.getVideoTracks().forEach((track) => {
+        track.onended = () => {
+          if (webcamStreamRef.current === stream) {
+            webcamStreamRef.current = null;
+            setWebcamEnabled(false);
+            setCameraActive(false);
+          }
+        };
+      });
     } catch (error) {
       const name = error instanceof DOMException ? error.name : "";
       if (name === "NotAllowedError" || name === "SecurityError") {
-        setWebcamError("Camera permission was denied. Allow camera access in your browser settings, then try again.");
+        setWebcamError(
+          "Camera permission was denied. Allow camera access in your browser settings."
+        );
       } else if (name === "NotFoundError" || name === "DevicesNotFoundError") {
         setWebcamError("No webcam was found on this device.");
-      } else {
-        setWebcamError(error instanceof Error ? error.message : "Could not start the webcam.");
+      } else if (name !== "AbortError") {
+        setWebcamError(
+          error instanceof Error ? error.message : "Could not start the webcam."
+        );
       }
     } finally {
-      setWebcamStarting(false);
+      if (requestId === webcamRequestRef.current) {
+        webcamStartingRef.current = false;
+        setWebcamStarting(false);
+      }
     }
-  };
+  }, []);
 
-  const stopWebcam = () => {
-    webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
+  const stopWebcam = useCallback(() => {
+    // Invalidate any getUserMedia request that is still waiting for permission.
+    webcamRequestRef.current += 1;
+    webcamStartingRef.current = false;
+
+    const stream = webcamStreamRef.current;
     webcamStreamRef.current = null;
-    if (webcamVideoRef.current) webcamVideoRef.current.srcObject = null;
+    stream?.getTracks().forEach((track) => {
+      track.onended = null;
+      track.stop();
+    });
+
+    if (webcamVideoRef.current) {
+      webcamVideoRef.current.pause();
+      webcamVideoRef.current.srcObject = null;
+    }
+
+    setWebcamStarting(false);
     setWebcamEnabled(false);
     setCameraActive(false);
-  };
+    setAnnotatedLiveImage("");
+    setLiveInferenceMs(null);
+    setLiveInferenceError("");
+  }, []);
 
-  // Always release the webcam when leaving the page.
+  // Automatically acquire/release the browser webcam with the selected mode.
+  useEffect(() => {
+    if (mode === "live") {
+      void startWebcam();
+    } else {
+      stopWebcam();
+    }
+  }, [mode, startWebcam, stopWebcam]);
+
+  // Reattach the existing stream if React remounts the video element.
+  useEffect(() => {
+    if (mode !== "live" || !webcamEnabled) return;
+
+    const video = webcamVideoRef.current;
+    const stream = webcamStreamRef.current;
+    if (!video || !stream) return;
+
+    if (video.srcObject !== stream) video.srcObject = stream;
+    void video.play().catch(() => {
+      setWebcamError("The webcam is connected but its preview could not resume.");
+    });
+  }, [mode, webcamEnabled]);
+
+  // Send a lightweight webcam frame to the backend YOLO model twice per second.
+  // Requests are serialized so a slow CPU inference never builds up a queue.
+  useEffect(() => {
+    if (mode !== "live" || !webcamEnabled) return;
+
+    let active = true;
+    let inFlight = false;
+
+    const analyzeWebcamFrame = async () => {
+      const video = webcamVideoRef.current;
+      if (!active || inFlight || !video || video.readyState < 2) return;
+
+      const sourceWidth = video.videoWidth;
+      const sourceHeight = video.videoHeight;
+      if (!sourceWidth || !sourceHeight) return;
+
+      inFlight = true;
+      liveInferenceInFlightRef.current = true;
+
+      try {
+        const maxWidth = 640;
+        const scale = Math.min(1, maxWidth / sourceWidth);
+        const canvas = document.createElement("canvas");
+        canvas.width = Math.max(1, Math.round(sourceWidth * scale));
+        canvas.height = Math.max(1, Math.round(sourceHeight * scale));
+        const context = canvas.getContext("2d");
+        if (!context) throw new Error("Could not prepare webcam frame.");
+
+        context.drawImage(video, 0, 0, canvas.width, canvas.height);
+        const blob = await new Promise<Blob>((resolve, reject) => {
+          canvas.toBlob(
+            (value) => value ? resolve(value) : reject(new Error("Could not encode webcam frame.")),
+            "image/jpeg",
+            0.72
+          );
+        });
+
+        if (!active) return;
+
+        const form = new FormData();
+        form.append("file", blob, "webcam-frame.jpg");
+        const response = await fetch(`${API}/live/frame`, {
+          method: "POST",
+          body: form,
+        });
+
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.detail || "Live frame inference failed.");
+        }
+        if (!active) return;
+
+        setAnnotatedLiveImage(result.annotated_image || "");
+        setLiveInferenceMs(
+          typeof result.inference_ms === "number" ? result.inference_ms : null
+        );
+        setLiveInferenceError("");
+
+        const rawEvent = result.activity_event || {};
+        const detections: Detection[] = result.detections || rawEvent.objects || [];
+        const event: Event = {
+          ...rawEvent,
+          source: "browser_webcam",
+          timestamp: rawEvent.timestamp || new Date().toISOString(),
+          frame_id: result.frame_id ?? rawEvent.frame_id ?? null,
+          objects: detections,
+          object_count: result.object_count ?? detections.length,
+          visible_objects: rawEvent.visible_objects ?? detections.length,
+          tracked_objects: rawEvent.tracked_objects ?? detections.length,
+        };
+
+        setLiveEvents((previous) => [
+          event,
+          ...previous.filter((item) => !(item.source === "browser_webcam" && item.frame_id === event.frame_id)),
+        ].slice(0, 200));
+        setLastUpdate(new Date().toLocaleTimeString());
+      } catch (error) {
+        if (active) {
+          setLiveInferenceError(
+            error instanceof Error ? error.message : "Live frame inference failed."
+          );
+        }
+      } finally {
+        inFlight = false;
+        liveInferenceInFlightRef.current = false;
+      }
+    };
+
+    const timer = setInterval(() => {
+      void analyzeWebcamFrame();
+    }, 500);
+    void analyzeWebcamFrame();
+
+    return () => {
+      active = false;
+      clearInterval(timer);
+    };
+  }, [mode, webcamEnabled]);
+
+  // Always release the webcam when the dashboard unmounts.
   useEffect(() => {
     return () => {
+      webcamRequestRef.current += 1;
+      webcamStartingRef.current = false;
       webcamStreamRef.current?.getTracks().forEach((track) => track.stop());
+      webcamStreamRef.current = null;
     };
   }, []);
 
@@ -260,38 +454,14 @@ export default function Home() {
     };
   }, [selectedFileUrl]);
 
-  // Real backend mode switch
-  const changeMode = async (nextMode: "live" | "media") => {
+  // Switch dashboard modes locally. The browser webcam is managed separately
+  // from the backend camera service, so this must not call POST /mode.
+  const changeMode = (nextMode: "live" | "media") => {
     if (nextMode === mode || switchingMode) return;
 
-    setSwitchingMode(true);
     setUploadError("");
-
-    try {
-      const response = await fetch(`${API}/mode`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ mode: nextMode }),
-      });
-
-      const result = await response.json();
-
-      if (!response.ok) {
-        throw new Error(result.detail || "Could not change operating mode");
-      }
-
-      if (nextMode === "media") {
-        setCameraActive(false);
-      }
-
-      setMode(nextMode);
-    } catch (error) {
-      setUploadError(
-        error instanceof Error ? error.message : "Mode change failed"
-      );
-    } finally {
-      setSwitchingMode(false);
-    }
+    if (nextMode === "media") stopWebcam();
+    setMode(nextMode);
   };
 
   // Upload image or video
@@ -662,26 +832,12 @@ export default function Home() {
             </div>
 
             <div className="mb-3 flex flex-wrap items-center gap-3">
-              {!webcamEnabled ? (
-                <button
-                  onClick={startWebcam}
-                  disabled={webcamStarting}
-                  className="rounded-xl px-5 py-3 text-sm font-bold text-white disabled:opacity-50"
-                  style={{ background: C.header }}
-                >
-                  {webcamStarting ? "Connecting webcam..." : "Enable this device's webcam"}
-                </button>
-              ) : (
-                <button
-                  onClick={stopWebcam}
-                  className="rounded-xl px-5 py-3 text-sm font-bold text-white"
-                  style={{ background: "#A94442" }}
-                >
-                  Stop webcam
-                </button>
-              )}
               <span className="text-xs" style={{ color: C.muted }}>
-                {webcamEnabled ? "Browser webcam connected" : "Camera permission is requested only when you click Enable"}
+                {webcamStarting
+                  ? "Connecting to this device's webcam..."
+                  : webcamEnabled
+                    ? "Device webcam connected"
+                    : "Waiting for webcam"}
               </span>
             </div>
 
@@ -706,7 +862,7 @@ export default function Home() {
                     className={`h-full w-full object-contain ${webcamEnabled ? "" : "hidden"}`}
                   />
                   {!webcamEnabled && (
-                    <p className="px-5 text-center text-sm text-white">Enable the webcam to see its live feed here.</p>
+                    <p className="px-5 text-center text-sm text-white">{webcamStarting ? "Connecting to webcam..." : "Waiting for webcam connection..."}</p>
                   )}
                 </div>
               </div>
@@ -716,12 +872,28 @@ export default function Home() {
                   <h4 className="text-sm font-bold">AI DETECTION FEED</h4>
                   <p className="mt-1 text-xs" style={{ color: C.muted }}>YOLO-annotated webcam frames</p>
                 </div>
-                <div className="flex aspect-[4/3] items-center justify-center bg-[#18232B] p-6">
-                  <p className="text-center text-sm text-white">
-                    {webcamEnabled
-                      ? "Webcam is connected. AI frame analysis will be connected in the next step."
-                      : "Enable the webcam first. AI analysis will follow."}
-                  </p>
+                <div className="relative flex aspect-[4/3] items-center justify-center bg-[#18232B]">
+                  {annotatedLiveImage ? (
+                    <img
+                      src={annotatedLiveImage}
+                      alt="YOLOv5 annotated live webcam frame"
+                      className="h-full w-full object-contain"
+                    />
+                  ) : (
+                    <p className="px-6 text-center text-sm text-white">
+                      {liveInferenceError || (webcamEnabled
+                        ? "Waiting for the first YOLO analysis..."
+                        : webcamError || "Waiting for webcam connection...")}
+                    </p>
+                  )}
+                  <div className="absolute bottom-3 left-3 right-3 flex flex-wrap items-center justify-between gap-2 rounded-lg bg-black/60 px-3 py-2 text-xs text-white">
+                    <span>{liveInferenceError ? "INFERENCE ERROR" : annotatedLiveImage ? "YOLOv5 · ONNX" : "AI ANALYSIS STARTING"}</span>
+                    <span>{liveInferenceMs != null ? `${liveInferenceMs.toFixed(0)} ms` : "— ms"}</span>
+                  </div>
+                </div>
+                <div className="border-t px-5 py-3" style={{ borderColor: C.border }}>
+                  <p className="text-xs font-semibold" style={{ color: C.muted }}>CURRENT FRAME DETECTIONS</p>
+                  <DetectionList detections={latestLive?.objects || []} compact />
                 </div>
               </div>
             </div>
