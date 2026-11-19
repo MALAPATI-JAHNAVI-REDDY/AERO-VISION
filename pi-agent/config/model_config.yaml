@@ -1,0 +1,16 @@
+model:
+  path: models/yolov5n.onnx
+  input_name: images
+  output_name: output0
+  input_size: 640
+  input_dtype: float16
+  class_count: 80
+
+detection:
+  confidence_threshold: 0.25
+  nms_threshold: 0.45
+  max_detections: 100
+
+runtime:
+  provider: CPUExecutionProvider
+  threads: 2
